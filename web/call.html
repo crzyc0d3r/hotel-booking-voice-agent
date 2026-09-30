@@ -1,0 +1,64 @@
+<!-- Browser side of the call: publishes the mic, plays agent audio, renders telemetry. -->
+<div id="root" style="font-family:system-ui,sans-serif;display:grid;grid-template-columns:3fr 2fr;gap:16px">
+  <div>
+    <div id="status" style="font-size:13px;color:#666">connecting…</div>
+    <h4 style="margin:8px 0">Transcript</h4>
+    <div id="log" style="height:430px;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:14px"></div>
+    <div id="partial" style="color:#999;font-style:italic;min-height:20px;margin-top:6px"></div>
+  </div>
+  <div>
+    <h4 style="margin:8px 0">Booking</h4>
+    <pre id="booking" style="background:#f6f6f6;border-radius:8px;padding:8px;font-size:12px;white-space:pre-wrap">{}</pre>
+    <h4 style="margin:8px 0">Latency per turn</h4>
+    <table id="lat" style="font-size:12px;border-collapse:collapse;width:100%">
+      <tr><th align="left">#</th><th align="right">speech→final</th><th align="right">final→voice</th></tr>
+    </table>
+    <div id="summary" style="font-size:12px;color:#444;margin-top:6px"></div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+const CFG = __CONFIG__;
+const LK = window.LivekitClient;
+const $ = (id) => document.getElementById(id);
+const add = (who, text) => {
+  const p = document.createElement("div");
+  p.innerHTML = `<b>${who}:</b> ${text.replace(/</g, "&lt;")}`;
+  $("log").appendChild(p); $("log").scrollTop = 1e9;
+};
+const ms = (v) => (v == null ? "–" : `${v} ms`);
+
+(async () => {
+  const room = new LK.Room({ adaptiveStream: true });
+  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === "audio") document.body.appendChild(track.attach());
+  });
+  room.on(LK.RoomEvent.TranscriptionReceived, (segs, participant) => {
+    // Agent speech transcription (the agent's own words) arrives here.
+    if (participant && participant.identity !== room.localParticipant.identity) {
+      segs.filter((s) => s.final).forEach((s) => add("Agent", s.text));
+    }
+  });
+  room.on(LK.RoomEvent.DataReceived, (payload, _p, _k, topic) => {
+    if (topic !== CFG.topic) return;
+    const ev = JSON.parse(new TextDecoder().decode(payload));
+    if (ev.type === "partial") $("partial").textContent = ev.text;
+    if (ev.type === "final") { $("partial").textContent = ""; add("You", ev.text); }
+    if (ev.type === "agent_state") $("status").textContent = `agent: ${ev.state}`;
+    if (ev.type === "booking") $("booking").textContent = JSON.stringify(ev.state, null, 2);
+    if (ev.type === "turn_latency") {
+      const r = $("lat").insertRow();
+      r.innerHTML = `<td>${ev.turn}</td><td align="right">${ms(ev.speech_to_final_ms)}</td><td align="right">${ms(ev.final_to_voice_ms)}</td>`;
+    }
+    if (ev.type === "summary" && ev.final_to_voice)
+      $("summary").textContent = `final→voice median ${ev.final_to_voice.median_ms} ms, p90 ${ev.final_to_voice.p90_ms} ms over ${ev.final_to_voice.n} turns`;
+  });
+  try {
+    await room.connect(CFG.url, CFG.token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    $("status").textContent = "connected – waiting for agent…";
+  } catch (e) {
+    $("status").textContent = "connection failed: " + e.message;
+  }
+})();
+</script>
